@@ -1,0 +1,65 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+  release-assets:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build all targets
+        run: |
+          tag="${{ needs.release-please.outputs.tag_name }}"
+          version="${tag#v}"
+          for t in linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
+            goos=${t%/*}
+            goarch=${t#*/}
+
+            ext=""
+            if [ "$goos" = "windows" ]; then ext=".exe"; fi
+
+            echo "::group::build ${goos}/${goarch}"
+
+            GOOS=$goos GOARCH=$goarch go build -trimpath \
+              -ldflags "-w -s -buildid= -X github.com/mynaparrot/plugnmeet-loadtester/version.Version=${version}" \
+              -o "loadtest-${tag}-${goos}-${goarch}${ext}" .
+
+            echo "::endgroup::"
+          done
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ needs.release-please.outputs.tag_name }}"
+          gh release upload "$tag" \
+            "loadtest-${tag}-linux-amd64" \
+            "loadtest-${tag}-linux-arm64" \
+            "loadtest-${tag}-windows-amd64.exe" \
+            "loadtest-${tag}-windows-arm64.exe"

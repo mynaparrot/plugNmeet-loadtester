@@ -1,0 +1,78 @@
+name: build
+
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Determine version
+        run: |
+          base=$(sed -n 's/^var Version = "\(.*\)"$/\1/p' version/version.go || true)
+          if [ -z "$base" ]; then base=0.0.0; fi
+          sha=$(git rev-parse --short HEAD)
+          echo "VERSION=${base}-${sha}" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Vet and build all targets
+        run: |
+          for t in linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
+            goos=${t%/*}
+            goarch=${t#*/}
+            ext=""
+            if [ "$goos" = "windows" ]; then ext=".exe"; fi
+            echo "::group::vet + build ${goos}/${goarch}"
+            GOOS=$goos GOARCH=$goarch go vet ./...
+            GOOS=$goos GOARCH=$goarch go build -trimpath \
+              -ldflags "-w -s -buildid= -X github.com/mynaparrot/plugnmeet-loadtester/version.Version=${VERSION}" \
+              -o "loadtest-${goos}-${goarch}${ext}" .
+            echo "::endgroup::"
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: loadtest-${{ env.VERSION }}-all-platforms
+          path: |
+            loadtest-linux-amd64
+            loadtest-linux-arm64
+            loadtest-windows-amd64.exe
+            loadtest-windows-arm64.exe
+          if-no-files-found: error
+      - name: Move beta tag
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git tag -f beta
+          git push origin beta --force
+      - uses: softprops/action-gh-release@v3
+        if: github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: beta
+          name: Beta Build
+          body: |
+            Rolling beta build from main @ ${{ github.sha }} — version ${{ env.VERSION }}.
+
+            Binaries print their exact version with `--version`.
+          prerelease: true
+          make_latest: false
+          files: |
+            loadtest-linux-amd64
+            loadtest-linux-arm64
+            loadtest-windows-amd64.exe
+            loadtest-windows-arm64.exe
